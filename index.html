@@ -222,10 +222,10 @@ dialog h2{font-size:16px;margin:0 0 8px}
       <h3 class="sub">Check these yourself</h3>
       <ul class="checks" id="flags"></ul>
       <div class="actions">
-        <button class="btn primary" id="saveReportBtn">Save the corrected report to SuiteFiles</button>
+        <button class="btn primary" id="saveReportBtn">Save the corrected report as a PDF</button>
         <button class="btn" id="dlWord">Download the corrected Word document</button>
       </div>
-      <p class="hint">Saving puts the corrected Word document back in Tax Returns and Financials, then Microsoft turns it into a PDF beside it. If a file with the same name is there, you choose Replace or Save as a copy.</p>
+      <p class="hint">The Word document in SuiteFiles is never changed. Microsoft turns the corrected version into a PDF, which is saved in Tax Returns and Financials. If a PDF with the same name is there, you choose Replace or Save as a copy.</p>
     </div>
     <div class="actions"><button class="btn" id="useExisting" hidden>Use the existing PDF as it is</button></div>
   </div>
@@ -553,7 +553,7 @@ dialog h2{font-size:16px;margin:0 0 8px}
   function voiceOf(m) { return m.voice || "group"; }
   function reportName(m) { return m.packTitle || "[Client name]"; }
   function returnsCount(m) { return m.returns || 1; }
-  function dueCell() { return "-"; }
+  function dueCell(e) { return (e && e.dueText) || "-"; }
   root.Core = { MONTHS, D, fmtDate, isoDate, fromIso, todayUTC, money, norm, sameName, pdfText, classify, KIND_LABEL, KIND_ORDER, otherLabel, parseCollationSheet, buildPack, packName };
 })(typeof window !== "undefined" ? window : globalThis);
 
@@ -599,7 +599,7 @@ dialog h2{font-size:16px;margin:0 0 8px}
     seg[0].textContent = s; seg[0].setAttributeNS(XMLNS, "xml:space", "preserve");
     seg.slice(1).forEach(t => { t.textContent = ""; });
   }
-  const lineList = paras => paras.flatMap(p => { const ls = lines(p); return ls.map(seg => ({ p, seg, single: ls.length === 1 })); });
+  const lineList = paras => paras.flatMap(p => { const ls = lines(p); return ls.map((seg, k) => ({ p, seg, single: ls.length === 1, first: k === 0 })); });
   function setText(p, s) {
     const ts = ownTexts(p); if (!ts.length) return;
     ts[0].textContent = s; ts[0].setAttributeNS(XMLNS, "xml:space", "preserve");
@@ -659,7 +659,7 @@ dialog h2{font-size:16px;margin:0 0 8px}
     });
     const ti = texts.findIndex(t => /Your Indepth Accounting Team/i.test(t));
     if (ti >= 0) for (let i = ti + 1; i < Math.min(texts.length, ti + 14); i++) { const t = texts[i]; if (!t || /@/.test(t)) continue; if (isHeadingText(t) && t.length > 12) break; if (/^[A-Z][a-z]+(?:[ -][A-Z][a-z'’]+)+$/.test(t) && !/Director|Manager|Accountant|Senior|Bookkeeper|Associate|Partner|Administrator/.test(t)) f.team.push(t); }
-    texts.forEach((t, i) => { if (/DECLARATION\s*OF\s*ACCEPTANCE/i.test(t)) { const nm = texts.slice(i + 1, i + 4).find(Boolean); if (nm) f.declarations.push(nm); } });
+    texts.forEach((t, i) => { if (/DECLARATION\s*OF\s*ACCEPTANCE/i.test(t) || (/^OF\s*ACCEPTANCE$/i.test(t) && /DECLARATION$/i.test(texts[i - 1] || ""))) { const nm = texts.slice(i + 1, i + 4).find(Boolean); if (nm) f.declarations.push(nm); } });
     return f;
   }
 
@@ -750,8 +750,8 @@ dialog h2{font-size:16px;margin:0 0 8px}
     BL.forEach((l, i) => {
       if (!/ELECTRONIC\s*SIGNING/i.test(ltext(l.seg))) return;
       for (let j = i + 1; j < Math.min(BL.length, i + 4); j++) {
-        const t = clean(ltext(BL[j].seg)); if (!t) continue;
-        if (/sign/i.test(t) && t !== SIGNING) add({ kind: "text", label: "Approved electronic signing wording", before: t, after: SIGNING, apply: () => setLine(BL[j].seg, SIGNING) });
+        const t = clean(ltext(BL[j].seg)); if (!t || isHeadingText(t)) continue;
+        if (t !== SIGNING) add({ kind: "text", label: "Approved electronic signing wording", before: t, after: SIGNING, apply: () => setLine(BL[j].seg, SIGNING) });
         break;
       }
     });
@@ -761,7 +761,7 @@ dialog h2{font-size:16px;margin:0 0 8px}
     const remove = (l, label) => add({ kind: "remove", label, before: clean(ltext(l.seg)), after: "", apply: () => { const p = l.p; if (!l.single) { setLine(l.seg, ""); return; } const tc = ancestor(p, "tc"); if (tc && cellParas(tc).length <= 1) setText(p, ""); else if (p.parentNode) p.parentNode.removeChild(p); } });
     BL.forEach((l, i) => {
       const p = l.p; const t = clean(ltext(l.seg)); if (!t) return;
-      if (voice === "single" && (/^Please carefully read each section and highlight/i.test(t) || /^We look forward to continuing to help you/i.test(t))) remove(l, "One entity, so this introduction line comes out");
+      if (/^Please carefully read each section and highlight/i.test(t) || /^We look forward to continuing to help you/i.test(t)) remove(l, "These introduction lines aren’t used");
       const ar = /\s*We will discuss (these|this) with you (at|on|in|during) (our|your|the) Annual Review Meeting\.?/i;
       if (ar.test(t)) { const rest = clean(t.replace(ar, "")); if (!rest) remove(l, "The Annual Review Meeting line isn’t needed"); else add({ kind: "text", label: "The Annual Review Meeting line isn’t needed", before: t, after: rest, apply: () => setLine(l.seg, clean(ltext(l.seg).replace(ar, ""))) }); }
       if (/^Would you like to discuss your results\??$/i.test(t)) {
@@ -776,6 +776,12 @@ dialog h2{font-size:16px;margin:0 0 8px}
     });
 
     // ---- the tax tables: cents, overdue dates, the 15 May footnote ----
+    const WHOLE = /^\(?-?\$[\d,]+\)?$/;
+    el(body, "tbl").forEach(tbl => rows(tbl).forEach(r => cells(r).forEach(c => {
+      const t = cellText(c); const p = cellParas(c).find(x => ptext(x).trim()); if (!p || !WHOLE.test(t)) return;
+      const withCents = x => x.replace(/(\$[\d,]+)(\)?)$/, "$1.00$2");
+      add({ kind: "text", label: "Added the cents", before: t, after: withCents(t), apply: () => { const cur = clean(ptext(p)); if (WHOLE.test(cur)) setText(p, withCents(cur)); } });
+    })));
     el(body, "tbl").forEach(tbl => {
       const rs = rows(tbl); if (rs.length < 2) return;
       const headCells = cells(rs[0]).map(c => squash(cellText(c)));
@@ -786,9 +792,8 @@ dialog h2{font-size:16px;margin:0 0 8px}
       rs.slice(1).forEach(r => {
         const cs = cells(r); const name = cellText(cs[0] || r);
         cs.forEach((c, ci) => {
-          if (ci === 0 || /TAXABLE/.test(headCells[ci] || "")) return;
+          if (ci === 0) return;
           const t = cellText(c); const p = cellParas(c).find(x => ptext(x).trim()); if (!p) return;
-          if (/^-?\$[\d,]+$/.test(t)) add({ kind: "text", label: "Added the cents", before: t, after: t + ".00", apply: () => { const cur = clean(ptext(p)); if (/^-?\$[\d,]+$/.test(cur)) setText(p, cur + ".00"); } });
           if (ci === dateCol && !/TOTAL/i.test(squash(name))) {
             const dd = parseDate(t);
             if (dd && dd < reportDate) add({ kind: "text", label: `The due date has passed (report dated ${fmt(reportDate)})`, before: t, after: "Immediately", apply: () => { if (parseDate(ptext(p))) setText(p, "Immediately"); } });
@@ -807,34 +812,121 @@ dialog h2{font-size:16px;margin:0 0 8px}
       }
     });
 
-    // ---- new pages and the Issues & Recommendations sub-headings ----
+    // ---- new pages and the Issues & Recommendations layout ----
+    // Layout from the approved library: sub-headings Calibri 11 bold italic ending with a colon,
+    // the body straight underneath, one blank line between sub-paragraphs.
     const bizNames = new Set(entities.filter(e => e.type !== "individual").map(e => clean(e.name).toLowerCase()));
-    let inBiz = false, inIR = false, afterBizHeading = false;
-    bodyParas.forEach(p => {
-      if (ancestor(p, "tbl")) return;
-      const t = clean(ptext(p)); if (!t) return;
+    const together = opts.keepTogether || new Set();
+    let inBiz = false, inIR = false, afterBizHeading = false, irCount = -1;
+    const SMALL = new Set(["of", "and", "vs", "vs.", "versus", "the", "for", "to", "on", "in", "&", "a", "or", "/", "-"]);
+    const looksLikeHeading = h => { const w = h.split(/\s+/); return w.length <= 9 && w.every(x => SMALL.has(x.toLowerCase()) || /^[A-Z0-9(]/.test(x)); };
+    const dropBreak = (p, label, t) => add({ kind: "page", label, before: t, after: t, apply: () => {
+      const pPr = child(p, "pPr"); if (pPr && child(pPr, "pageBreakBefore")) pPr.removeChild(child(pPr, "pageBreakBefore"));
+      el(p, "br").filter(b => b.getAttributeNS(WNS, "type") === "page" && ancestor(b, "p") === p).forEach(b => b.parentNode.removeChild(b));
+      const q = prevPara(p);
+      if (q) { const brs = el(q, "br").filter(b => b.getAttributeNS(WNS, "type") === "page" && ancestor(b, "p") === q); if (brs.length && !ptext(q).trim()) brs.forEach(b => b.parentNode.removeChild(b)); }
+    } });
+    BL.forEach(l => {
+      const p = l.p; const t = clean(ltext(l.seg)); if (!t) return;
       const T = squash(t);
-      const pageBreak = label => { if (hasPageBreak(p) || hasPageBreak(prevPara(p))) return; add({ kind: "page", label, before: t, after: t, apply: () => { const doc = p.ownerDocument; const pPr = ensure(doc, p, "pPr", true); if (!child(pPr, "pageBreakBefore")) pPr.insertBefore(doc.createElementNS(WNS, "w:pageBreakBefore"), pPr.firstChild); } }); };
+      const pageBreak = label => { if (!l.first || hasPageBreak(p) || hasPageBreak(prevPara(p))) return; add({ kind: "page", label, before: t, after: t, apply: () => { const doc = p.ownerDocument; const pPr = ensure(doc, p, "pPr", true); if (!child(pPr, "pageBreakBefore")) pPr.insertBefore(doc.createElementNS(WNS, "w:pageBreakBefore"), pPr.firstChild); } }); };
       if (/^BUSINESSINCOME$/.test(T)) { inBiz = true; afterBizHeading = true; inIR = false; return; }
-      if (/^ISSUES&RECOMMENDATIONS$/.test(T)) { pageBreak("New page before Issues & Recommendations"); inIR = true; return; }
+      if (/^ISSUES&RECOMMENDATIONS$/.test(T)) {
+        irCount++;
+        if (together.has(irCount)) { if (hasPageBreak(p) || hasPageBreak(prevPara(p))) dropBreak(p, "Kept on the page before, so a short section isn’t left alone on a page", t); }
+        else pageBreak("New page before Issues & Recommendations");
+        inIR = true; return;
+      }
       if (/^BENCHMARK/.test(T) && t.length < 50) { pageBreak("New page before Benchmarks"); inIR = false; return; }
-      if (/^(PERSONALINCOME|ACTIONSFORYOU|FINANCIALSTATEMENTS|CONFIRMATION)/.test(T)) { inBiz = false; inIR = false; }
+      if (/^(PERSONALINCOME|ACTIONSFORYOU|FINANCIALSTATEMENTS|CONFIRMATION|SUMMARY$)/.test(T)) { inBiz = false; inIR = false; }
       if (inBiz && bizNames.has(t.toLowerCase())) { if (!afterBizHeading) pageBreak("New page before each business entity"); afterBizHeading = false; inIR = false; return; }
-      if (/^SUMMARY$/.test(T)) return;
       afterBizHeading = afterBizHeading && t.length < 20;
-      if (inIR && t.length < 90 && /:$/.test(t)) {
-        const runs = el(p, "r").filter(r => ancestor(r, "p") === p);
-        const already = runs.every(r => { const rp = child(r, "rPr"); return rp && child(rp, "i"); });
-        if (!already) add({ kind: "style", label: "Issues & Recommendations sub-heading set to Calibri 11 italic", before: t, after: t, apply: () => runs.forEach(r => {
-          const doc = r.ownerDocument; const rPr = ensure(doc, r, "rPr", true);
-          let fonts = child(rPr, "rFonts"); if (!fonts) { fonts = doc.createElementNS(WNS, "w:rFonts"); rPr.insertBefore(fonts, rPr.firstChild); }
-          ["ascii", "hAnsi", "cs"].forEach(a => fonts.setAttributeNS(WNS, "w:" + a, "Calibri"));
-          ["asciiTheme", "hAnsiTheme", "cstheme"].forEach(a => fonts.removeAttributeNS(WNS, a));
-          if (!child(rPr, "i")) rPr.appendChild(doc.createElementNS(WNS, "w:i"));
-          let sz = child(rPr, "sz"); if (!sz) { sz = doc.createElementNS(WNS, "w:sz"); rPr.appendChild(sz); } sz.setAttributeNS(WNS, "w:val", "22");
-        }) });
+      if (!inIR) return;
+      const m = t.match(/^([A-Z][^:]{2,80}?):\s*(\S.*)?$/);
+      if (!m || !looksLikeHeading(m[1]) || (m[2] && !/^[A-Z]/.test(m[2]))) return;
+      const head = m[1] + ":", bodyTxt = m[2] || "";
+      add({ kind: "style", label: bodyTxt ? "Issues & Recommendations sub-heading put on its own line, Calibri 11 bold italic" : "Issues & Recommendations sub-heading set to Calibri 11 bold italic", before: t, after: bodyTxt ? head + " / " + bodyTxt : head, apply: () => {
+        const doc = p.ownerDocument; const seg = l.seg; if (!seg.length) return;
+        const run = ancestor(seg[0], "r"); if (!run) return;
+        setLine(seg, head);
+        const rPr = ensure(doc, run, "rPr", true);
+        const plainRPr = rPr.cloneNode(true);
+        let fonts = child(rPr, "rFonts"); if (!fonts) { fonts = doc.createElementNS(WNS, "w:rFonts"); rPr.insertBefore(fonts, rPr.firstChild); }
+        ["ascii", "hAnsi", "cs"].forEach(a => fonts.setAttributeNS(WNS, "w:" + a, "Calibri"));
+        ["asciiTheme", "hAnsiTheme", "cstheme"].forEach(a => fonts.removeAttributeNS(WNS, a));
+        ["b", "i", "bCs", "iCs"].forEach(n => { const c = child(plainRPr, n); if (c) plainRPr.removeChild(c); });
+        ["b", "i"].forEach(n => { if (!child(rPr, n)) rPr.appendChild(doc.createElementNS(WNS, "w:" + n)); });
+        let sz = child(rPr, "sz"); if (!sz) { sz = doc.createElementNS(WNS, "w:sz"); rPr.appendChild(sz); } sz.setAttributeNS(WNS, "w:val", "22");
+        if (bodyTxt) {
+          const nr = doc.createElementNS(WNS, "w:r"); nr.appendChild(plainRPr); nr.appendChild(doc.createElementNS(WNS, "w:br"));
+          const nt = doc.createElementNS(WNS, "w:t"); nt.setAttributeNS(XMLNS, "xml:space", "preserve"); nt.textContent = bodyTxt; nr.appendChild(nt);
+          run.parentNode.insertBefore(nr, run.nextSibling);
+        }
+        if (l.first) {
+          const pPr = ensure(doc, p, "pPr", true); let sp = child(pPr, "spacing"); if (!sp) { sp = doc.createElementNS(WNS, "w:spacing"); pPr.appendChild(sp); }
+          sp.setAttributeNS(WNS, "w:before", "220"); sp.setAttributeNS(WNS, "w:after", "0");
+          if (!child(pPr, "keepNext")) pPr.insertBefore(doc.createElementNS(WNS, "w:keepNext"), pPr.firstChild);
+        } else {
+          // a sub-heading that follows another sub-paragraph inside the same paragraph gets one blank line above it
+          run.parentNode.insertBefore((() => { const r = doc.createElementNS(WNS, "w:r"); r.appendChild(doc.createElementNS(WNS, "w:br")); return r; })(), run);
+        }
+      } });
+    });
+
+    // ---- signing spots on each Declaration of Acceptance ----
+    // Matched to the number of directors, trustees or partners who sign the financial statements.
+    const signers = opts.signers || {};
+    BL.forEach((l, i) => {
+      const t = clean(ltext(l.seg));
+      if (!(/DECLARATION\s*OF\s*ACCEPTANCE/i.test(t) || (/^OF\s*ACCEPTANCE$/i.test(t) && i && /DECLARATION$/i.test(clean(ltext(BL[i - 1].seg)))))) return;
+      const nameLine = BL.slice(i + 1, i + 4).map(x => clean(ltext(x.seg))).find(Boolean) || "";
+      const key = Object.keys(signers).find(k => clean(k).toLowerCase() === nameLine.toLowerCase()) || Object.keys(signers).find(k => squash(k).replace(/[^A-Z0-9]/g, "") === squash(nameLine).replace(/[^A-Z0-9]/g, ""));
+      const sigIdx = BL.findIndex((x, j) => j > i && /^SIGNATURE\(?S?\)?$/i.test(clean(ltext(x.seg))));
+      if (sigIdx < 0 || sigIdx > i + 12) return;
+      if (!key) { flags.push(`I couldn’t find the financial statements for ${nameLine || "a Declaration of Acceptance"}, so its signing spots weren’t matched. Check how many people sign.`); return; }
+      const need = signers[key];
+      // the signing spots: a table straight after SIGNATURE(S), or lines of underscores and "Date:"
+      let node = BL[sigIdx].p.nextSibling; while (node && node.nodeType !== 1) node = node.nextSibling;
+      const groups = []; // each: { sig: [spots...], date: [spots...] } where a spot is { clear() }
+      if (node && node.localName === "tbl") {
+        const rs = rows(node); let cur = null;
+        rs.forEach(r => {
+          const cs = cells(r); const txt = cs.map(cellText);
+          if (txt.some(x => /_{5,}/.test(x))) { cur = { rows: [r], sig: cs.filter((c, k) => /_{5,}/.test(txt[k])) }; groups.push(cur); }
+          else if (cur && txt.some(x => /^Date:?/i.test(x))) { cur.rows.push(r); cur.date = cs.filter((c, k) => /^Date/i.test(txt[k])); }
+          else if (cur && !txt.join("").trim()) cur.rows.push(r);
+        });
+        const per = groups.length ? groups[0].sig.length : 0, total = groups.reduce((a, g) => a + g.sig.length, 0);
+        if (!per || total <= need) return;
+        const keepG = Math.ceil(need / per), rem = need - (keepG - 1) * per;
+        add({ kind: "remove", label: `Signing spots matched to the financial statements (${need} to sign)`, before: `${nameLine}: ${total} signing spots`, after: `${need} signing spot${need === 1 ? "" : "s"}`, apply: () => {
+          groups.slice(keepG).forEach(g => g.rows.forEach(r => r.parentNode && r.parentNode.removeChild(r)));
+          const last = groups[keepG - 1];
+          if (last && rem < per) { last.sig.slice(rem).forEach(c => cellParas(c).forEach(q => setText(q, ""))); (last.date || []).slice(rem).forEach(c => cellParas(c).forEach(q => setText(q, ""))); }
+        } });
+      } else {
+        const block = []; for (let j = sigIdx + 1; j < BL.length; j++) { const x = BL[j], xt = clean(ltext(x.seg)); if (xt && !/_{5,}/.test(xt) && !/^Date:?/i.test(xt)) break; if (j > sigIdx + 1 && x.p !== BL[j - 1].p && hasPageBreak(x.p)) break; block.push(x); }
+        let cur = null;
+        block.forEach(x => { const xt = clean(ltext(x.seg)); if (/_{5,}/.test(xt)) { cur = { sigLine: x, n: (xt.match(/_{5,}/g) || []).length }; groups.push(cur); } else if (cur && /^Date/i.test(xt)) cur.dateLine = x; });
+        const per = groups.length ? groups[0].n : 0, total = groups.reduce((a, g) => a + g.n, 0);
+        if (!per || total <= need) return;
+        const keepG = Math.ceil(need / per), rem = need - (keepG - 1) * per;
+        add({ kind: "remove", label: `Signing spots matched to the financial statements (${need} to sign)`, before: `${nameLine}: ${total} signing spots`, after: `${need} signing spot${need === 1 ? "" : "s"}`, apply: () => {
+          const gone = x => { if (!x) return; if (x.single && x.p.parentNode) x.p.parentNode.removeChild(x.p); else setLine(x.seg, ""); };
+          groups.slice(keepG).forEach(g => { gone(g.sigLine); gone(g.dateLine); });
+          const last = groups[keepG - 1];
+          if (last && rem < per) {
+            const st = ltext(last.sigLine.seg); let k = 0; setLine(last.sigLine.seg, st.replace(/_{5,}/g, m => (++k <= rem ? m : "")).trimEnd());
+            if (last.dateLine) { let d = 0; setLine(last.dateLine.seg, ltext(last.dateLine.seg).replace(/Date:?/g, m => (++d <= rem ? m : "")).trimEnd()); }
+          }
+        } });
       }
     });
+
+    // ---- a cover letter that has already lost lines ----
+    const letterLines = BL.slice(0, 60).map(l => clean(ltext(l.seg)));
+    if (letterLines.some(x => /Income Tax Returns?\s+(has|have)\s+been\s+completed/i.test(x)) && !letterLines.some(x => /^We have estimated/i.test(x)) && !letterLines.some(x => /^Please carefully review and sign/i.test(x)))
+      flags.unshift("The cover letter is missing the estimate and “Please carefully review and sign” lines. This Word document may be one damaged by the earlier version of this tool. Restore the original from version history before you go on.");
 
     // ---- things a person needs to look at ----
     BL.forEach(l => { const t = clean(ltext(l.seg)); if (/\bto\s*-\s*\$[\d,]+/.test(t)) flags.push(`“${t.slice(0, 110)}${t.length > 110 ? "…" : ""}” shows a negative profit. Check whether it should say it’s a loss.`); });
@@ -882,6 +974,7 @@ async function compilationSpots(bytes) {
   const SETUP = { tenantId: "e0690e4c-36c8-47bf-b896-bc1ecf320a7c", clientId: "191dcf6b-f13e-491c-9556-280d809b602a" };
   const DRIVE = "b!c82T-jhzL0eu4-AHjF9EKCLCKVMsd55FtWuNLmIYMZohHmghm0pKSbXCQuWfihYQ";
   const ASSET_FOLDER = "Shared Space/Client Database/Progress Report/Tool Files";
+  const TEMP_FOLDER = "Shared Space/Client Database/Progress Report/Tool Files/Working copies";
   const OLD_ASSET_FOLDER = "Shared Space/Client Database/BAS & IAS/Tool files";
   const PRIVATE = ["Signature_Renee.png", "Gotham-Bold.ttf", "Gotham-Medium.ttf", "Gotham-Book.ttf"];
   const SCOPES = ["User.Read", "Files.ReadWrite.All"];
@@ -976,6 +1069,13 @@ async function compilationSpots(bytes) {
         return null;
       }
     },
+    /* Word to PDF without touching the client's folder: the corrected Word document goes to a
+       working folder, Microsoft converts it, and the working copy is deleted straight away. */
+    async wordToPdf(name, bytes) {
+      const j = await upload(TEMP_FOLDER, Date.now() + " " + name, bytes, "rename");
+      try { return await pdfOf(j.id); }
+      finally { try { await graph(`/drives/${DRIVE}/items/${j.id}`, { method: "DELETE" }); } catch (e) { /* left in the working folder */ } }
+    },
     start(hooks) {
       app = hooks;
       if (!window.msal) { renderAuth(); return; }
@@ -1065,6 +1165,7 @@ async function findDocs() {
     say("findMsg", `Found ${[docx ? "the progress report" : "", sheet ? "the collation spreadsheet" : "", pdf ? "an earlier PDF of the report" : ""].filter(Boolean).join(", ") || "the folder"}. Reading the documents…`);
     renderAll();
     await Promise.all([docx ? loadReport(docx) : Promise.resolve(), gatherAll()]);
+    if (docx) await replan();
     say("findMsg", `${S.ents.length} entit${S.ents.length === 1 ? "y" : "ies"} ${sheet ? "from " + sheet.name : "(no collation spreadsheet found, so only the main entity)"}.`);
     if (!docx) say("reportMsg", pdf ? "There’s no Word version of the progress report, but there is a PDF. You can use that as it is." : "I couldn’t find the progress report Word document in Tax Returns and Financials. Save it there as “" + year + " Cover Letter & Progress Report.docx”, then click Find the documents again.", !pdf);
   } catch (e) { say("findMsg", "Something went wrong reading SuiteFiles (" + e.message + "). Try again.", true); }
@@ -1078,7 +1179,7 @@ async function loadReport(item) {
 }
 function tidyOpts() {
   const fd = $("footOn").checked ? C.fromIso($("footDate").value) : null;
-  return { year: S.year, groupName: "", entities: S.ents.map(e => ({ name: e.name, type: e.type })), voice: $("voice").value, returns: +$("returns").value || S.ents.length, reportDate: C.fromIso($("repDate").value) || null, footnoteDate: fd, singleName: S.ents.length === 1 ? S.ents[0].name : "" };
+  return { year: S.year, groupName: "", entities: S.ents.map(e => ({ name: e.name, type: e.type })), voice: $("voice").value, returns: +$("returns").value || S.ents.length, reportDate: C.fromIso($("repDate").value) || null, footnoteDate: fd, singleName: S.ents.length === 1 ? S.ents[0].name : "", signers: S.signers || {}, keepTogether: S.keep || new Set() };
 }
 async function replan() {
   if (!S.docx) return;
@@ -1134,21 +1235,39 @@ async function downloadWord() {
   try { download(await correctedDocx(), S.docx.item.name, "application/vnd.openxmlformats-officedocument.wordprocessingml.document"); }
   catch (e) { say("reportMsg", "I couldn’t build the corrected Word document (" + e.message + ").", true); }
 }
+/* A page holding only a short section (for example Distribution of Company Profits) before an
+   Issues & Recommendations page is a waste of paper, so the page break before that Issues &
+   Recommendations is dropped and the report converted again. */
+async function lonelyBreaks(pdf) {
+  const t = await C.pdfText(pdfjsLib, pdf.slice());
+  const body = pg => pg.split("\n").map(x => x.trim()).filter(x => x && !/ANNUAL\s*TAX\s*SUMMARY/i.test(x.replace(/\s+/g, " ")) && !/^P\s*A\s*G\s*E\s*\d/i.test(x) && !/^©/.test(x) && !/^\d+$/.test(x));
+  const isIR = x => /^ISSUES\s*&\s*RECOMMENDATIONS$/i.test(x.replace(/\s+/g, " "));
+  const out = []; let ir = -1;
+  t.pages.forEach((pg, i) => {
+    const b = body(pg);
+    if (b.length && isIR(b[0])) { ir++; const prev = body(t.pages[i - 1] || ""); if (i > 0 && prev.join(" ").length < 320 && !prev.some(isIR)) out.push(ir); }
+    else if (b.some(isIR)) ir++;
+  });
+  return out;
+}
 async function saveReport() {
   const btn = $("saveReportBtn"); btn.disabled = true;
   try {
-    say("reportMsg", "Saving the corrected Word document…");
-    const bytes = await correctedDocx();
-    const folder = trf(S.client, S.year);
-    const saved = await P.save(folder, S.docx.item.name, bytes);
-    if (!saved) { say("reportMsg", "Nothing was saved."); return; }
-    say("reportMsg", "Microsoft is turning it into a PDF…");
-    const pdf = await P.pdfOf(saved.id);
-    const pdfName = saved.name.replace(/\.docx$/i, ".pdf");
-    const savedPdf = await P.save(folder, pdfName, pdf);
-    S.reportPdf = pdf; S.reportFrom = savedPdf ? savedPdf.name : "the corrected report (PDF not saved)";
-    say("reportMsg", `Saved ${saved.name}${savedPdf ? " and " + savedPdf.name : ""} to ${S.client} › ${S.year} › Tax Returns and Financials. The PDF is now first in the collation.`);
-  } catch (e) { say("reportMsg", "Saving didn’t work (" + e.message + "). Nothing was overwritten. Try again.", true); }
+    say("reportMsg", "Making the corrected report and turning it into a PDF…");
+    S.keep = new Set();
+    let pdf = null;
+    for (let pass = 0; pass < 3; pass++) {
+      pdf = await P.wordToPdf(S.docx.item.name, await correctedDocx());
+      const lonely = (await lonelyBreaks(pdf)).filter(i => !S.keep.has(i));
+      if (!lonely.length) break;
+      lonely.forEach(i => S.keep.add(i));
+      say("reportMsg", "Moving a short section so it isn’t left alone on a page…");
+    }
+    const pdfName = S.docx.item.name.replace(/\.docx$/i, ".pdf");
+    const saved = await P.save(trf(S.client, S.year), pdfName, pdf);
+    S.reportPdf = pdf; S.reportFrom = saved ? saved.name : "the corrected report (PDF not saved)";
+    say("reportMsg", saved ? `Saved ${saved.name} to ${S.client} › ${S.year} › Tax Returns and Financials. The Word document hasn’t been changed. The PDF is now first in the collation.` : "The PDF wasn’t saved, but it’s ready to go first in the collation.");
+  } catch (e) { say("reportMsg", "That didn’t work (" + e.message + "). Nothing in the client’s folder was changed. Try again.", true); }
   finally { btn.disabled = false; renderChecks(); renderPackBtn(); }
 }
 async function useExistingPdf() {
@@ -1163,6 +1282,7 @@ async function gatherAll() {
   for (const e of S.ents) if (e.folder) jobs.push(gather(e));
   jobs.push(gatherOrg());
   await Promise.all(jobs);
+  S.signers = signerCounts();
   renderAll();
 }
 function ownerFor(file, text, e) {
@@ -1182,12 +1302,12 @@ async function gather(e) {
       if (!isPdf(it.name)) continue;
       let kind = C.classify(it.name, "", "trf");
       if (["own", "skip"].includes(kind)) continue;
-      let bytes = null, text = "";
-      try { bytes = await P.getBytes(it.id); const t = await C.pdfText(pdfjsLib, bytes.slice()); text = t.pages.slice(0, 2).join("\n"); kind = C.classify(it.name, text, "trf"); } catch (err) { /* unreadable: kept by name */ }
+      let bytes = null, text = "", pages = [];
+      try { bytes = await P.getBytes(it.id); const t = await C.pdfText(pdfjsLib, bytes.slice()); pages = t.pages; text = t.pages.slice(0, 2).join("\n"); kind = C.classify(it.name, text, "trf"); } catch (err) { /* unreadable: kept by name */ }
       if (["own", "skip", "data", "collation", "template", "workpaper", "planning"].includes(kind)) continue;
       const owner = ownerFor(it, text, e);
       if (S.files.some(f => f.itemId === it.id)) continue;
-      addFile({ itemId: it.id, name: it.name, kind, bytes, text, entityId: owner.id, fromFolder: e.id });
+      addFile({ itemId: it.id, name: it.name, kind, bytes, text, pages: ["fs", "itr"].includes(kind) ? pages : null, entityId: owner.id, fromFolder: e.id });
     }
   } catch (err) { e.error = "I couldn’t read this folder."; }
   e.loading = false;
@@ -1203,6 +1323,21 @@ async function gatherOrg() {
   // an org chart saved in an entity's year folder is moved to the front too
   S.files.filter(f => f.kind === "org").forEach(f => { f.entityId = "org"; });
   if (main) {} // org charts always sit straight after the report
+}
+/* How many people sign each entity's financial statements: the director, trustee or partner lines on
+   the declaration page (never the compilation report, which Renee signs). */
+function countSigners(pages) {
+  for (const pg of pages || []) {
+    if (!/declaration/i.test(pg) || /compilation report/i.test(pg) || /declaration of acceptance/i.test(pg)) continue;
+    const n = pg.split("\n").map(x => x.trim()).filter(x => /^(Sole )?(Director|Trustee|Partner|Director\s*(&|and)\s*Secretary|Secretary)$/i.test(x)).length;
+    if (n) return n;
+  }
+  return 0;
+}
+function signerCounts() {
+  const out = {};
+  S.ents.forEach(e => { const fs = S.files.find(f => f.entityId === e.id && f.kind === "fs" && f.pages); const n = fs ? countSigners(fs.pages) : 0; if (n) out[e.name] = n; });
+  return out;
 }
 function addFile(f) {
   f.id = "f" + (++S.seq);
@@ -1282,13 +1417,22 @@ function renderPackBtn() { $("packBtn").disabled = !!S.blocked || !S.reportPdf; 
 function renderAll() { renderEntities(); renderReport(); renderChecks(); $("work").hidden = !S.client; }
 
 // ---------- Step 4: build and save ----------
+function toCentsLoose(s) { const m = String(s || "").replace(/[^\d.]/g, ""); return m ? Math.round(parseFloat(m) * 100) : null; }
+function parseLongDate(s) { const m = String(s || "").trim().match(/^(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})$/); if (!m) return null; const mi = C.MONTHS.findIndex(x => x.toLowerCase() === m[2].toLowerCase()); return mi < 0 ? null : C.D(+m[3], mi, +m[1]); }
 async function buildPack() {
   const btn = $("packBtn"); btn.disabled = true; say("packMsg", "Putting the collation together…");
   try {
     const files = S.files.filter(f => f.inPack && f.bytes && f.kind !== "amendedMinutes").map(f => ({ ...f, entityId: f.kind === "org" ? undefined : f.entityId, year: undefined }));
-    const ents = S.ents.map(e => ({ id: e.id, name: e.name }));
+    const ents = S.ents.map(e => {
+      const pos = S.plan ? S.plan.facts.positions.find(x => C.sameName(x.name, e.name)) : null;
+      let final = pos && /payable/i.test(pos.kind) ? toCentsLoose(pos.amount) : null, dueText = pos ? pos.due : "";
+      if (final === null) { const itr = S.files.find(f => f.entityId === e.id && f.kind === "itr" && f.pages); const m = itr && itr.pages.join(" ").match(/Amount payable\s+S?\s*\$([\d,]+\.\d{2})/); if (m) final = toCentsLoose(m[1]); }
+      const dd = parseLongDate(dueText); const rd = C.fromIso($("repDate").value) || C.todayUTC();
+      if (dd && dd < rd) dueText = "Immediately";
+      return { id: e.id, name: e.name, fig: final ? { final } : {}, dueText };
+    });
     const returns = S.ents.filter(e => S.files.some(f => f.entityId === e.id && f.kind === "itr" && f.inPack)).length || S.ents.length;
-    const model = { year: S.year, entities: ents, packTitle: $("packTitle").value.trim(), returns, voice: S.ents.length > 1 ? "group" : "single", collation: [], collationTicks: false, earlierYears: [], slipAmount: false, assets: { compSigBytes: $("compSig").checked ? ASSETS["Signature_Renee.png"] : null } };
+    const model = { year: S.year, entities: ents, packTitle: $("packTitle").value.trim(), returns, voice: S.ents.length > 1 ? "group" : "single", collation: [], collationTicks: false, earlierYears: [], slipAmount: true, assets: { compSigBytes: $("compSig").checked ? ASSETS["Signature_Renee.png"] : null } };
     const r = await C.buildPack(PDFLib, fontkit, ASSETS, model, S.reportPdf, files);
     S.pack = { bytes: r.bytes, name: C.packName(model, files) };
     if (S.packUrl) URL.revokeObjectURL(S.packUrl);
