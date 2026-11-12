@@ -520,15 +520,28 @@ dialog h2{font-size:16px;margin:0 0 8px}
           doc.addPage(p);
           // compilation report: Renee's signature above her name
           if (f.kind === "fs" && compSig) (f.sigSpots || []).filter(s => s.page === pi).forEach(s => p.drawImage(compSig, { x: s.x, y: s.y + s.h + 2, width: 70, height: 70 * compSig.height / compSig.width }));
-          // ATO payment slip: show the amount payable on this year's return
+          // ATO payment slip: the slip as the ATO printed it, with the amount payable put in the Balance
+          // column (the ATO shows $0.00 until the return is lodged) and the browser's print header and
+          // footer taken off. Positions come from the slip itself (slipSpots); if they can't be found,
+          // the amount goes in a box at the foot of the slip instead.
           if (f.kind === "slip" && pi === 0 && e.fig && e.fig.final > 0 && model.slipAmount !== false) {
-            const t1 = `${Y} income tax return: amount payable ${money(e.fig.final)}`, due = dueCell(e, model).replace("*", ""), t2 = due && due !== "-" ? `Due ${due}` : "";
-            const { width: pw, height: ph } = p.getSize(); const bw = Math.max(helvB.widthOfTextAtSize(t1, 11), helv.widthOfTextAtSize(t2, 10)) + 24;
-            // in the empty space at the foot of the slip, clear of the ATO's agent and client details
-            const by = 64;
-            p.drawRectangle({ x: pw - bw - 30, y: by, width: bw, height: t2 ? 44 : 30, color: C.white, borderColor: C.deep, borderWidth: 1.2 });
-            p.drawText(t1, { x: pw - bw - 18, y: by + 22 + (t2 ? 0 : -6), size: 11, font: helvB, color: C.black });
-            if (t2) p.drawText(t2, { x: pw - bw - 18, y: by + 7, size: 10, font: helv, color: C.black });
+            const amt = money(e.fig.final), due = dueCell(e, model).replace("*", ""), dueTxt = due && due !== "-" ? (/^immediately$/i.test(due) ? "Due immediately" : `Due ${due}`) : "";
+            const sp = f.slipSpots;
+            if (sp && sp.balance) {
+              (sp.hide || []).forEach(r => p.drawRectangle({ x: r.x - 2, y: r.y - 3, width: r.w + 4, height: r.h + 6, color: C.white }));
+              const b = sp.balance, size = Math.max(7, Math.min(11, b.size));
+              p.drawRectangle({ x: b.x - 3, y: b.y - 3, width: b.w + 6, height: size + 5, color: C.white });
+              const aw = helvB.widthOfTextAtSize(amt, size);
+              p.drawText(amt, { x: b.right - aw, y: b.y, size, font: helvB, color: C.black });
+              if (dueTxt && sp.band) { const ds = Math.max(7, Math.min(11, sp.band.size)), dw = helvB.widthOfTextAtSize(dueTxt, ds); p.drawText(dueTxt, { x: b.right - dw, y: sp.band.y, size: ds, font: helvB, color: C.black }); }
+            } else {
+              const t1 = `${Y} income tax return: amount payable ${amt}`, t2 = dueTxt;
+              const { width: pw } = p.getSize(); const bw = Math.max(helvB.widthOfTextAtSize(t1, 11), helv.widthOfTextAtSize(t2, 10)) + 24;
+              const by = 64;
+              p.drawRectangle({ x: pw - bw - 30, y: by, width: bw, height: t2 ? 44 : 30, color: C.white, borderColor: C.deep, borderWidth: 1.2 });
+              p.drawText(t1, { x: pw - bw - 18, y: by + 22 + (t2 ? 0 : -6), size: 11, font: helvB, color: C.black });
+              if (t2) p.drawText(t2, { x: pw - bw - 18, y: by + 7, size: 10, font: helv, color: C.black });
+            }
           }
         });
       }
@@ -731,6 +744,7 @@ dialog h2{font-size:16px;margin:0 0 8px}
     const textRules = [
       { why: "Removed a stray space in an amount", where: "all", fn: t => t.replace(/(\$[\d,]+)\s+(\.\d{2})\b/g, "$1$2") },
       { why: "Fixed a stray &amp; symbol", where: "all", fn: t => t.replace(/&amp;(amp;)?/g, "&") },
+      { why: "Accounting versus Taxation Income, written out in full", where: "all", fn: t => t.replace(/\bAccounting\s+vs\.?\s+Taxation\s+Income\b/gi, "Accounting versus Taxation Income") },
       { why: "Added 30 June to the year end", where: "all", fn: t => t.replace(/\bfor the year (ending|ended)\s+(20\d\d)\b(?!\s*\d)(\s*\.)?/g, (m, a, y, dot) => `for the year ended 30 June ${y}${dot ? "." : ""}`) },
       { why: "Removed the space before a full stop", where: "all", fn: t => t.replace(/(\S)\s+\.(\s|$)/g, (m, a, b) => /[\d$]/.test(a) ? m : a + "." + b) },
       { why: "Chose payable or refundable", where: "text", when: () => kinds.size === 1, fn: t => t.replace(/payable\s*\/\s*refundable/gi, m => (m[0] === "P" ? [...kinds][0][0].toUpperCase() + [...kinds][0].slice(1) : [...kinds][0])) },
@@ -878,13 +892,12 @@ dialog h2{font-size:16px;margin:0 0 8px}
       if (/^BUSINESSINCOME$/.test(T)) { inBiz = true; afterBizHeading = true; inIR = false; return; }
       if (/^ISSUES&RECOMMENDATIONS$/.test(T)) {
         irCount++;
-        if (together.has(irCount)) { if (hasPageBreak(p) || hasPageBreak(prevPara(p))) dropBreak(p, "Kept on the page before, so a short section isn’t left alone on a page", t); }
-        else pageBreak("New page before Issues & Recommendations");
+        // no new page here: the business sections run on (the layout pass below sets the spacing)
         inIR = true; return;
       }
       if (/^BENCHMARK/.test(T) && t.length < 50) { pageBreak("New page before Benchmarks"); inIR = false; return; }
       if (/^(PERSONALINCOME|ACTIONSFORYOU|FINANCIALSTATEMENTS|CONFIRMATION|SUMMARY$)/.test(T)) { inBiz = false; inIR = false; }
-      if (inBiz && bizNames.has(t.toLowerCase())) { if (!afterBizHeading) pageBreak("New page before each business entity"); afterBizHeading = false; inIR = false; return; }
+      if (inBiz && bizNames.has(t.toLowerCase())) { afterBizHeading = false; inIR = false; return; }
       afterBizHeading = afterBizHeading && t.length < 20;
       if (!inIR) return;
       const m = t.match(/^([A-Z][^:]{2,80}?):\s*(\S.*)?$/);
@@ -979,6 +992,16 @@ dialog h2{font-size:16px;margin:0 0 8px}
       }
     });
 
+
+    // ---- page layout: the business sections run on, with even spacing ----
+    /* Matches the layout the firm approved (Lili's edited Horn Graders report): from Business Income
+       (or Personal Income) to the Actions for you section, nothing is forced onto a new page. Sections
+       follow each other with one blank line (two before a new entity, Issues & Recommendations and
+       Actions for you), runs of blank lines are closed up, headings stay with what follows them, and
+       each Declaration of Acceptance or Confirmation starts its own page. Section starts (SUMMARY)
+       keep their page breaks. This runs after every other change. */
+    add({ kind: "page", label: "Business sections run on with even spacing, no blank pages, headings kept with their text", before: "Page breaks and blank lines from ChangeGPS", after: "Approved layout", apply: () => layout(body, bizNames) });
+
     // ---- a cover letter that has already lost lines ----
     const letterLines = BL.slice(0, 60).map(l => clean(ltext(l.seg)));
     if (letterLines.some(x => /Income Tax Returns?\s+(has|have)\s+been\s+completed/i.test(x)) && !letterLines.some(x => /^We have estimated/i.test(x)) && !letterLines.some(x => /^Please carefully review and sign/i.test(x)))
@@ -996,6 +1019,110 @@ dialog h2{font-size:16px;margin:0 0 8px}
     return { facts: f, voice, changes, flags: [...new Set(flags.map(tidyFlag))], year: Y };
   }
 
+
+  /* The approved layout pass (see plan). Works on the body's top-level paragraphs and tables. */
+  function layout(body, bizNames) {
+    const doc = body.nodeType === 9 ? body : body.ownerDocument;
+    const root = el(body, "body")[0] || body;
+    const kids = () => Array.from(root.childNodes).filter(n => n.nodeType === 1 && n.namespaceURI === WNS && (n.localName === "p" || n.localName === "tbl"));
+    const isP = n => n && n.localName === "p";
+    const txt = n => isP(n) ? clean(ptext(n)) : "tbl";
+    const hasDrawing = p => el(p, "drawing").length > 0 || el(p, "pict").length > 0 || el(p, "object").length > 0;
+    const pageBrs = p => el(p, "br").filter(b => b.getAttributeNS(WNS, "type") === "page" && ancestor(b, "p") === p);
+    const pPrOf = p => child(p, "pPr");
+    const hasPBB = p => !!(pPrOf(p) && child(pPrOf(p), "pageBreakBefore"));
+    const hasSect = p => !!(pPrOf(p) && child(pPrOf(p), "sectPr"));
+    const breaksAfter = p => pageBrs(p).length > 0;
+    const isBlank = n => isP(n) && !txt(n) && !hasDrawing(n) && !breaksAfter(n) && !hasSect(n) && !hasPBB(n);
+    const T = n => squash(txt(n));
+    const isDeclHead = (n, i, list) => isP(n) && (/^FINANCIALSTATEMENTS$/.test(T(n)) && list.slice(i + 1, i + 4).some(x => /^DECLARATION/.test(T(x))) || /DECLARATIONOFACCEPTANCE/.test(T(n)) && !/^FINANCIALSTATEMENTS/.test(T(list[i - 1] || n)) || /^CONFIRMATION/.test(T(n)));
+    const MAJOR = /^(ISSUES&RECOMMENDATIONS|ACTIONSFOR YOU|ACTIONSFORYOU|BENCHMARK)/;
+    const SUB = new Set(["PAYMENTOFCOMPANYTAX", "PAYMENTOFTRUSTTAX", "OTHERISSUES/NOTES", "ACCOUNTINGVERSUSTAXATIONINCOME", "ACCOUNTINGVS.TAXATIONINCOME"]);
+    const isEntity = n => isP(n) && bizNames.has(txt(n).toLowerCase());
+    const isHeading = n => isP(n) && !!txt(n) && (isHeadingText(txt(n)) || isEntity(n) || SUB.has(T(n)));
+    const isMajor = n => isP(n) && (MAJOR.test(T(n)) || isEntity(n));
+    const setPBB = (p, on) => { const pPr = ensure(doc, p, "pPr", true); const c = child(pPr, "pageBreakBefore"); if (on && !c) pPr.insertBefore(doc.createElementNS(WNS, "w:pageBreakBefore"), pPr.firstChild); if (!on && c) pPr.removeChild(c); };
+    const keepNext = p => { const pPr = ensure(doc, p, "pPr", true); if (!child(pPr, "keepNext")) pPr.insertBefore(doc.createElementNS(WNS, "w:keepNext"), pPr.firstChild); };
+    let list = kids();
+    // the span: first BUSINESS INCOME / PERSONAL INCOME heading to the first declaration or confirmation
+    const start = list.findIndex(n => /^(BUSINESSINCOME|PERSONALINCOME)$/.test(T(n)));
+    if (start < 0) return;
+    let end = list.findIndex((n, i) => i > start && isDeclHead(n, i, list)); if (end < 0) end = list.length;
+    const span = list.slice(start, end);
+    const nextText = i => { for (let j = i + 1; j < list.length; j++) if (txt(list[j])) return list[j]; return null; };
+    // 1. no forced page breaks inside the span, except before a new section (SUMMARY)
+    span.forEach(n => {
+      if (!isP(n)) return;
+      const i = list.indexOf(n), nt = nextText(i);
+      const sectionNext = nt && /^SUMMARY$/.test(T(nt));
+      if (hasPBB(n) && !/^SUMMARY$/.test(T(n))) setPBB(n, false);
+      if (breaksAfter(n) && !sectionNext) pageBrs(n).forEach(b => { const r = b.parentNode; r.removeChild(b); if (r.localName === "r" && !Array.from(r.childNodes).some(c => c.nodeType === 1 && c.localName !== "rPr")) r.parentNode.removeChild(r); });
+    });
+    // 2. tidy line breaks inside paragraphs: none trailing, at most one blank line between lines
+    span.filter(isP).forEach(p => {
+      const brs = el(p, "br").filter(b => !b.getAttributeNS(WNS, "type") && ancestor(b, "p") === p);
+      if (!brs.length) return;
+      // walk the paragraph's visible items in order: text, or a plain break
+      const items = []; const walk = x => { for (const c of Array.from(x.childNodes)) { if (c.nodeType !== 1) continue; if (c.namespaceURI === WNS && c.localName === "t") { if (c.textContent.trim()) items.push({ k: "t" }); continue; } if (c.namespaceURI === WNS && (c.localName === "br" || c.localName === "cr") && !c.getAttributeNS(WNS, "type")) { items.push({ k: "br", n: c }); continue; } if (c.namespaceURI === WNS && (c.localName === "drawing" || c.localName === "tab")) { items.push({ k: "t" }); continue; } walk(c); } };
+      walk(p);
+      let run = [];
+      const flush = (trailing) => { const extra = trailing ? run : run.slice(2); extra.forEach(it => it.n.parentNode && it.n.parentNode.removeChild(it.n)); run = []; };
+      items.forEach(it => { if (it.k === "br") run.push(it); else flush(false); });
+      flush(true);
+    });
+    // 3. blank lines: close up runs, then one blank before each heading (two before a major one)
+    list = kids();
+    const s2 = list.indexOf(span[0]); let e2 = list.findIndex((n, i) => i > s2 && isDeclHead(n, i, list)); if (e2 < 0) e2 = list.length;
+    let model = null;
+    for (let i = s2; i < e2; i++) if (isBlank(list[i])) { model = list[i]; break; }
+    if (!model) model = list.slice(0, s2).reverse().find(isBlank) || null;
+    const zone = list.slice(s2, e2);
+    // drop every blank paragraph in the zone, remembering where content sits
+    const content = zone.filter(n => !isBlank(n));
+    const blanksBefore = new Map(); { let c = 0; zone.forEach(n => { if (isBlank(n)) c++; else { blanksBefore.set(n, c); c = 0; } }); }
+    zone.filter(isBlank).forEach(n => n.parentNode.removeChild(n));
+    const prevContent = (k) => content[k - 1];
+    content.forEach((n, k) => {
+      if (k === 0) return;
+      const prev = prevContent(k);
+      const prevTxt = isP(prev) ? T(prev) : "";
+      if (isP(prev) && (breaksAfter(prev))) return;               // after a page break: none
+      if (isP(n) && hasPBB(n)) return;                             // starts a page: none
+      // a heading that carries on another heading (SUMMARY / BUSINESS INCOME, or ELECTRONIC SIGNING / OF TAX RETURNS) sits straight under it
+      const twoLine = isP(prev) && isHeading(prev) && isHeading(n) && !isEntity(n) && !SUB.has(T(n)) && !MAJOR.test(T(n)) && (/^(SUMMARY|ELECTRONIC|RECORD|YOU ARE|FINANCIAL)/.test(prevTxt) || /^(OF|REQUIREMENTS)/.test(T(n)));
+      if (twoLine) return;
+      const firstEntity = isEntity(n) && isP(prev) && /^(BUSINESSINCOME|PERSONALINCOME)$/.test(prevTxt);
+      const want = !isHeading(n) ? Math.min(blanksBefore.get(n) || 0, 1) : isMajor(n) && !firstEntity ? 2 : 1;
+      if (!model) return;
+      for (let j = 0; j < want; j++) n.parentNode.insertBefore(model.cloneNode(true), n);
+    });
+    // 4. headings stay with what follows (and the blank lines under them)
+    list = kids();
+    list.forEach((n, i) => {
+      if (!isHeading(n) || list.indexOf(n) < s2) return;
+      keepNext(n);
+      let j = i + 1; for (; j < list.length && isBlank(list[j]); j++) keepNext(list[j]);
+      // Issues & Recommendations: its one-line introduction stays with the first issue too
+      if (/^ISSUES&RECOMMENDATIONS$/.test(T(n)) && list[j] && isP(list[j]) && txt(list[j]).length < 160) { keepNext(list[j]); for (j++; j < list.length && isBlank(list[j]); j++) keepNext(list[j]); }
+    });
+    // small tables (payment schedules) don't split across pages
+    span.filter(n => n.localName === "tbl").forEach(tb => rows(tb).forEach((r, ri, all) => {
+      let trPr = child(r, "trPr"); if (!trPr) { trPr = doc.createElementNS(WNS, "w:trPr"); r.insertBefore(trPr, r.firstChild); }
+      if (!child(trPr, "cantSplit")) trPr.appendChild(doc.createElementNS(WNS, "w:cantSplit"));
+      if (ri < all.length - 1 && all.length <= 8) el(r, "p").forEach(keepNext);
+    }));
+    // 5. each Declaration of Acceptance / Confirmation on its own page, with no blank page in front
+    list = kids();
+    list.forEach((n, i) => {
+      if (!isDeclHead(n, i, list)) return;
+      // remove blank paragraphs straight before it (they can spill onto a page of their own)
+      let x = n.previousSibling; while (x && (x.nodeType !== 1 || isBlank(x))) { const y = x.previousSibling; if (x.nodeType === 1) x.parentNode.removeChild(x); x = y; }
+      const prev = x && x.nodeType === 1 ? x : null;
+      const broken = prev && isP(prev) && (breaksAfter(prev) || hasSect(prev));
+      if (!broken) setPBB(n, true); else setPBB(n, false);
+    });
+  }
+
   async function apply(JSZip, d, changes) {
     changes.filter(c => c.keep).forEach(c => c.apply());
     for (const n in d.parts) d.zip.file(n, new XMLSerializer().serializeToString(d.parts[n]));
@@ -1007,6 +1134,29 @@ dialog h2{font-size:16px;margin:0 0 8px}
 
 </script>
 <script>
+/* Where things sit on an ATO payment slip (printed from Online services for agents): the Balance
+   cell in the Account details row, the grey "Account details" band, and the browser's print header
+   and footer. Read from the slip's own text, so nothing is guessed. */
+async function slipSpots(bytes) {
+  const doc = await pdfjsLib.getDocument({ data: new Uint8Array(bytes) }).promise;
+  const page = await doc.getPage(1); const { height } = page.getViewport({ scale: 1 });
+  const items = (await page.getTextContent()).items.filter(i => i.str && i.str.trim()).map(i => ({ s: i.str.trim(), x: i.transform[4], y: i.transform[5], w: i.width, size: Math.hypot(i.transform[2], i.transform[3]) || Math.abs(i.transform[3]) || 8 }));
+  const out = { hide: [] };
+  items.forEach(i => {
+    const top = i.y > height - 40, foot = i.y < 40;
+    if ((top && (/^\d{1,2}\/\d{1,2}\/\d{4},?\s+\d{1,2}:\d{2}/.test(i.s) || /^Print\s*\|\s*Australian Taxation Office/i.test(i.s))) || (foot && (/^https?:\/\/onlineservices\.ato\.gov\.au/i.test(i.s) || /^\d+\/\d+$/.test(i.s))))
+      out.hide.push({ x: i.x, y: i.y, w: i.w, h: i.size });
+  });
+  const head = items.find(i => /^Balance$/i.test(i.s)); const band = items.find(i => /^Account details$/i.test(i.s));
+  if (head) {
+    const right = head.x + head.w;
+    // the first row under the headings, in the Balance column
+    const cell = items.filter(i => i.y < head.y - 2 && i.y > head.y - 40 && Math.abs(i.x + i.w - right) < 6 && /^-?\$?[\d,]+\.\d{2}$/.test(i.s)).sort((a, b) => b.y - a.y)[0];
+    if (cell && /^\$?0\.00$/.test(cell.s)) out.balance = { x: cell.x, y: cell.y, w: cell.w, size: cell.size, right };
+  }
+  if (band && out.balance) out.band = { y: band.y, size: band.size };
+  return out;
+}
 async function compilationSpots(bytes) {
   const doc = await pdfjsLib.getDocument({ data: new Uint8Array(bytes) }).promise; const spots = [];
   for (let p = 1; p <= Math.min(doc.numPages, 6); p++) {
@@ -1405,6 +1555,7 @@ function addFile(f) {
   f.inPack = f.kind === "org" ? true : f.kind === "amendedMinutes" ? false : f.kind === "other" ? !!f.forcePack : ticks ? ticks.includes(f.kind) : PACK_KINDS.includes(f.kind);
   S.files.push(f);
   if (f.kind === "fs" && f.bytes) compilationSpots(f.bytes.slice()).then(s => { f.sigSpots = s; }).catch(() => {});
+  if (f.kind === "slip" && f.bytes) slipSpots(f.bytes.slice()).then(s => { f.slipSpots = s; }).catch(() => {});
 }
 async function addLocal(fileList) {
   const ent = $("addTo").value;
@@ -1480,6 +1631,7 @@ function parseLongDate(s) { const m = String(s || "").trim().match(/^(\d{1,2})\s
 async function buildPack() {
   const btn = $("packBtn"); btn.disabled = true; say("packMsg", "Putting the collation together…");
   try {
+    for (const f of S.files) if (f.inPack && f.bytes && f.kind === "slip" && !f.slipSpots) { try { f.slipSpots = await slipSpots(f.bytes.slice()); } catch (e) { f.slipSpots = null; } }
     const files = S.files.filter(f => f.inPack && f.bytes && f.kind !== "amendedMinutes").map(f => ({ ...f, entityId: f.kind === "org" ? undefined : f.entityId, year: undefined }));
     const ents = S.ents.map(e => {
       const pos = S.plan ? S.plan.facts.positions.find(x => C.sameName(x.name, e.name)) : null;
