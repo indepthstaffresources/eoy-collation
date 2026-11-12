@@ -524,9 +524,11 @@ dialog h2{font-size:16px;margin:0 0 8px}
           if (f.kind === "slip" && pi === 0 && e.fig && e.fig.final > 0 && model.slipAmount !== false) {
             const t1 = `${Y} income tax return: amount payable ${money(e.fig.final)}`, due = dueCell(e, model).replace("*", ""), t2 = due && due !== "-" ? `Due ${due}` : "";
             const { width: pw, height: ph } = p.getSize(); const bw = Math.max(helvB.widthOfTextAtSize(t1, 11), helv.widthOfTextAtSize(t2, 10)) + 24;
-            p.drawRectangle({ x: pw - bw - 30, y: ph - 92, width: bw, height: t2 ? 44 : 30, color: C.white, borderColor: C.deep, borderWidth: 1.2 });
-            p.drawText(t1, { x: pw - bw - 18, y: ph - 70 + (t2 ? 0 : -6), size: 11, font: helvB, color: C.black });
-            if (t2) p.drawText(t2, { x: pw - bw - 18, y: ph - 85, size: 10, font: helv, color: C.black });
+            // in the empty space at the foot of the slip, clear of the ATO's agent and client details
+            const by = 64;
+            p.drawRectangle({ x: pw - bw - 30, y: by, width: bw, height: t2 ? 44 : 30, color: C.white, borderColor: C.deep, borderWidth: 1.2 });
+            p.drawText(t1, { x: pw - bw - 18, y: by + 22 + (t2 ? 0 : -6), size: 11, font: helvB, color: C.black });
+            if (t2) p.drawText(t2, { x: pw - bw - 18, y: by + 7, size: 10, font: helv, color: C.black });
           }
         });
       }
@@ -629,11 +631,30 @@ dialog h2{font-size:16px;margin:0 0 8px}
   const cellParas = tc => el(tc, "p").filter(p => ancestor(p, "tc") === tc);
   const cellText = tc => clean(cellParas(tc).map(ptext).join(" "));
 
+  /* ChangeGPS writes line breaks inside the text itself (<w:t>line one<w:br/>line two</w:t>). Word shows
+     them, but anything that rewrites the text would wipe the breaks and the lines after them. Each one is
+     split into its own text and break, which Word shows exactly the same way. */
+  function normalise(doc) {
+    el(doc, "t").filter(t => Array.from(t.childNodes).some(c => c.nodeType === 1)).forEach(t => {
+      const out = []; let buf = "";
+      const flush = () => { if (!buf) return; const nt = doc.createElementNS(WNS, "w:t"); nt.setAttributeNS(XMLNS, "xml:space", "preserve"); nt.textContent = buf; out.push(nt); buf = ""; };
+      Array.from(t.childNodes).forEach(c => {
+        if (c.nodeType === 3) buf += c.nodeValue;
+        else if (c.nodeType === 1 && c.localName === "br") { flush(); const br = doc.createElementNS(WNS, "w:br"); Array.from(c.attributes || []).forEach(a => br.setAttributeNS(a.namespaceURI, a.name, a.value)); out.push(br); }
+        else if (c.nodeType === 1 && c.localName === "tab") { flush(); out.push(doc.createElementNS(WNS, "w:tab")); }
+        else if (c.nodeType === 1) buf += c.textContent;
+      });
+      flush();
+      if (!out.length) { t.textContent = ""; return; }
+      out.forEach(n => t.parentNode.insertBefore(n, t));
+      t.parentNode.removeChild(t);
+    });
+  }
   async function readDocx(JSZip, bytes) {
     const zip = await JSZip.loadAsync(bytes);
     const names = Object.keys(zip.files).filter(n => /^word\/(document|header\d*|footer\d*)\.xml$/.test(n));
     const parts = {};
-    for (const n of names) parts[n] = new DOMParser().parseFromString(await zip.file(n).async("string"), "application/xml");
+    for (const n of names) { parts[n] = new DOMParser().parseFromString(await zip.file(n).async("string"), "application/xml"); normalise(parts[n]); }
     return { zip, parts };
   }
 
@@ -783,6 +804,30 @@ dialog h2{font-size:16px;margin:0 0 8px}
       add({ kind: "text", label: "Added the cents", before: t, after: withCents(t), apply: () => { const cur = clean(ptext(p)); if (WHOLE.test(cur)) setText(p, withCents(cur)); } });
     })));
     el(body, "tbl").forEach(tbl => {
+      const grid = child(tbl, "tblGrid"); if (!grid) return;
+      const cols = Array.from(grid.childNodes).filter(c => c.nodeType === 1 && c.localName === "gridCol");
+      if (cols.length < 3) return;
+      const w = cols.map(c => +c.getAttributeNS(WNS, "w") || 0);
+      const rs = rows(tbl); const len = w.map(() => 0); const moneyCells = [];
+      rs.forEach(r => { const cs = cells(r); if (cs.length !== cols.length) return; cs.forEach((c, ci) => { const t = cellText(c); if (ci && (WHOLE.test(t) || /^\(?-?\$[\d,]+\.\d\d\)?$/.test(t))) { moneyCells.push(c); len[ci] = Math.max(len[ci], t.replace(/\.\d\d(\)?)$/, "$1").length + 3); } }); });
+      if (!moneyCells.length) return;
+      // about 120 twips a character for bold 10 point figures, plus the cell margins
+      const fits = (ci, width, per) => !len[ci] || len[ci] * per + 230 <= width;
+      const need = w.map((x, ci) => ci && len[ci] ? len[ci] * 120 + 230 : 0);
+      const spare = Math.max(0, w[0] - 2400);
+      const add2 = w.map((x, ci) => ci && need[ci] > x ? need[ci] - x : 0);
+      const total = add2.reduce((a2, b2) => a2 + b2, 0);
+      const scale = total ? Math.min(1, spare / total) : 0;
+      const nw = w.map((x, ci) => ci ? x + Math.round(add2[ci] * scale) : x - Math.round(total * scale));
+      const size = w.every((x, ci) => fits(ci, nw[ci], 120)) ? 0 : w.every((x, ci) => fits(ci, nw[ci], 108)) ? 18 : 16;
+      if (!total && !size) return;
+      add({ kind: "style", label: "Money columns sized so amounts with cents stay on one line", before: cells(rs[0]).map(cellText).join(" | ").slice(0, 90), after: size ? `figures set to ${size / 2} point` : "columns widened", apply: () => {
+        cols.forEach((c, ci) => c.setAttributeNS(WNS, "w:w", String(nw[ci])));
+        rs.forEach(r => { const cs = cells(r); if (cs.length !== cols.length) return; cs.forEach((c, ci) => { const pr = child(c, "tcPr"); const tw = pr && child(pr, "tcW"); if (tw) { tw.setAttributeNS(WNS, "w:w", String(nw[ci])); tw.setAttributeNS(WNS, "w:type", "dxa"); } }); });
+        if (size) moneyCells.forEach(c => cellParas(c).forEach(q => el(q, "r").forEach(r => { const doc = r.ownerDocument; const rPr = ensure(doc, r, "rPr", true); ["sz", "szCs"].forEach(n => { let z = child(rPr, n); if (!z) { z = doc.createElementNS(WNS, "w:" + n); rPr.appendChild(z); } z.setAttributeNS(WNS, "w:val", String(size)); }); })));
+      } });
+    });
+    el(body, "tbl").forEach(tbl => {
       const rs = rows(tbl); if (rs.length < 2) return;
       const headCells = cells(rs[0]).map(c => squash(cellText(c)));
       const head = headCells.join("|");
@@ -848,6 +893,8 @@ dialog h2{font-size:16px;margin:0 0 8px}
       add({ kind: "style", label: bodyTxt ? "Issues & Recommendations sub-heading put on its own line, Calibri 11 bold italic" : "Issues & Recommendations sub-heading set to Calibri 11 bold italic", before: t, after: bodyTxt ? head + " / " + bodyTxt : head, apply: () => {
         const doc = p.ownerDocument; const seg = l.seg; if (!seg.length) return;
         const run = ancestor(seg[0], "r"); if (!run) return;
+        const now = clean(ltext(seg)).match(/^([A-Z][^:]{2,80}?):\s*(\S.*)?$/); if (!now) return;
+        const head = now[1] + ":", bodyTxt = now[2] || "";
         setLine(seg, head);
         const rPr = ensure(doc, run, "rPr", true);
         const plainRPr = rPr.cloneNode(true);
@@ -867,8 +914,16 @@ dialog h2{font-size:16px;margin:0 0 8px}
           sp.setAttributeNS(WNS, "w:before", "220"); sp.setAttributeNS(WNS, "w:after", "0");
           if (!child(pPr, "keepNext")) pPr.insertBefore(doc.createElementNS(WNS, "w:keepNext"), pPr.firstChild);
         } else {
-          // a sub-heading that follows another sub-paragraph inside the same paragraph gets one blank line above it
-          run.parentNode.insertBefore((() => { const r = doc.createElementNS(WNS, "w:r"); r.appendChild(doc.createElementNS(WNS, "w:br")); return r; })(), run);
+          // a sub-heading inside a longer paragraph gets exactly one blank line above it
+          let brs = 0, x = run.previousSibling;
+          walk: while (x) {
+            if (x.nodeType === 1 && x.localName === "r") {
+              const kids = Array.from(x.childNodes).filter(c => c.nodeType === 1 && c.localName !== "rPr").reverse();
+              for (const c of kids) { if (c.localName === "br") brs++; else if (c.localName === "t" && !c.textContent) continue; else break walk; }
+            }
+            x = x.previousSibling;
+          }
+          for (let k = brs; k < 2; k++) { const r = doc.createElementNS(WNS, "w:r"); r.appendChild(doc.createElementNS(WNS, "w:br")); run.parentNode.insertBefore(r, run); }
         }
       } });
     });
@@ -905,19 +960,20 @@ dialog h2{font-size:16px;margin:0 0 8px}
           if (last && rem < per) { last.sig.slice(rem).forEach(c => cellParas(c).forEach(q => setText(q, ""))); (last.date || []).slice(rem).forEach(c => cellParas(c).forEach(q => setText(q, ""))); }
         } });
       } else {
-        const block = []; for (let j = sigIdx + 1; j < BL.length; j++) { const x = BL[j], xt = clean(ltext(x.seg)); if (xt && !/_{5,}/.test(xt) && !/^Date:?/i.test(xt)) break; if (j > sigIdx + 1 && x.p !== BL[j - 1].p && hasPageBreak(x.p)) break; block.push(x); }
-        let cur = null;
-        block.forEach(x => { const xt = clean(ltext(x.seg)); if (/_{5,}/.test(xt)) { cur = { sigLine: x, n: (xt.match(/_{5,}/g) || []).length }; groups.push(cur); } else if (cur && /^Date/i.test(xt)) cur.dateLine = x; });
-        const per = groups.length ? groups[0].n : 0, total = groups.reduce((a, g) => a + g.n, 0);
+        // the spots run until the next text; ChangeGPS ends the last "Date:" line with the page break to the next declaration
+        const pageBr = q => el(q, "br").some(x => x.getAttributeNS(WNS, "type") === "page" && ancestor(x, "p") === q);
+        const block = []; for (let j = sigIdx + 1; j < BL.length; j++) { const x = BL[j], xt = clean(ltext(x.seg)); if (xt && !/_{5,}/.test(xt) && !/^(Date:?\s*)+$/i.test(xt)) break; const pr = child(x.p, "pPr"); if (pr && child(pr, "pageBreakBefore")) break; block.push(x); if (pageBr(x.p)) break; }
+        const sigLines = block.filter(x => /_{5,}/.test(ltext(x.seg))), dateLines = block.filter(x => /^Date/i.test(clean(ltext(x.seg))));
+        const spots = x => Math.max(x.seg.filter(t => /_{5,}/.test(t.textContent)).length, 1);
+        const per = sigLines.length ? spots(sigLines[0]) : 0, total = sigLines.reduce((a, x) => a + spots(x), 0);
         if (!per || total <= need) return;
         const keepG = Math.ceil(need / per), rem = need - (keepG - 1) * per;
         add({ kind: "remove", label: `Signing spots matched to the financial statements (${need} to sign)`, before: `${nameLine}: ${total} signing spots`, after: `${need} signing spot${need === 1 ? "" : "s"}`, apply: () => {
-          const gone = x => { if (!x) return; if (x.single && x.p.parentNode) x.p.parentNode.removeChild(x.p); else setLine(x.seg, ""); };
-          groups.slice(keepG).forEach(g => { gone(g.sigLine); gone(g.dateLine); });
-          const last = groups[keepG - 1];
-          if (last && rem < per) {
-            const st = ltext(last.sigLine.seg); let k = 0; setLine(last.sigLine.seg, st.replace(/_{5,}/g, m => (++k <= rem ? m : "")).trimEnd());
-            if (last.dateLine) { let d = 0; setLine(last.dateLine.seg, ltext(last.dateLine.seg).replace(/Date:?/g, m => (++d <= rem ? m : "")).trimEnd()); }
+          const gone = x => { if (!x) return; if (x.single && !pageBr(x.p) && x.p.parentNode) x.p.parentNode.removeChild(x.p); else { setLine(x.seg, ""); el(x.p, "tab").filter(tb => ancestor(tb, "p") === x.p).forEach(tb => tb.parentNode.removeChild(tb)); } };
+          sigLines.slice(keepG).forEach(gone); dateLines.slice(keepG).forEach(gone);
+          if (rem < per) {
+            const ls = sigLines[keepG - 1]; let k = 0; ls.seg.forEach(t => { if (/_{5,}/.test(t.textContent) && ++k > rem) t.textContent = ""; });
+            const ld = dateLines[keepG - 1]; if (ld) { let d = 0; ld.seg.forEach(t => { if (/Date/i.test(t.textContent) && ++d > rem) t.textContent = ""; }); }
           }
         } });
       }
@@ -1240,8 +1296,10 @@ async function downloadWord() {
    Recommendations is dropped and the report converted again. */
 async function lonelyBreaks(pdf) {
   const t = await C.pdfText(pdfjsLib, pdf.slice());
-  const body = pg => pg.split("\n").map(x => x.trim()).filter(x => x && !/ANNUAL\s*TAX\s*SUMMARY/i.test(x.replace(/\s+/g, " ")) && !/^P\s*A\s*G\s*E\s*\d/i.test(x) && !/^©/.test(x) && !/^\d+$/.test(x));
-  const isIR = x => /^ISSUES\s*&\s*RECOMMENDATIONS$/i.test(x.replace(/\s+/g, " "));
+  // ChangeGPS letter-spaces the header and page numbers ("A NNUA L T A X", "P A G E 6"), so compare without spaces
+  const sq = x => x.replace(/\s+/g, "").toUpperCase();
+  const body = pg => pg.split("\n").map(x => x.trim()).filter(x => x && !/ANNUALTAXSUMMARY/.test(sq(x)) && !/^PAGE\d+$/.test(sq(x)) && !/^©/.test(x) && !/^\d+$/.test(x));
+  const isIR = x => sq(x) === "ISSUES&RECOMMENDATIONS";
   const out = []; let ir = -1;
   t.pages.forEach((pg, i) => {
     const b = body(pg);
