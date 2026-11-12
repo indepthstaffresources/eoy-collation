@@ -575,6 +575,31 @@ dialog h2{font-size:16px;margin:0 0 8px}
   const ptext = p => ownTexts(p).map(t => t.textContent).join("");
   const squash = s => String(s).replace(/\s+/g, "").toUpperCase();
   const clean = s => String(s).replace(/\s+/g, " ").trim();
+  /* A Word paragraph can hold several visible lines separated by line breaks (ChangeGPS builds the
+     cover letter this way). Each line is handled on its own so a fix to one line never touches the others. */
+  function lines(p) {
+    const segs = [[]];
+    const walk = n => {
+      for (const c of Array.from(n.childNodes)) {
+        if (c.nodeType !== 1) continue;
+        if (c.namespaceURI === WNS) {
+          if (c.localName === "p" || c.localName === "txbxContent" || c.localName === "instrText" || c.localName === "delText") continue;
+          if (c.localName === "t") { segs[segs.length - 1].push(c); continue; }
+          if (c.localName === "br" || c.localName === "cr") { segs.push([]); continue; }
+        }
+        walk(c);
+      }
+    };
+    walk(p);
+    return segs.filter(sg => sg.length);
+  }
+  const ltext = seg => seg.map(t => t.textContent).join("");
+  function setLine(seg, s) {
+    if (!seg.length) return;
+    seg[0].textContent = s; seg[0].setAttributeNS(XMLNS, "xml:space", "preserve");
+    seg.slice(1).forEach(t => { t.textContent = ""; });
+  }
+  const lineList = paras => paras.flatMap(p => { const ls = lines(p); return ls.map(seg => ({ p, seg, single: ls.length === 1 })); });
   function setText(p, s) {
     const ts = ownTexts(p); if (!ts.length) return;
     ts[0].textContent = s; ts[0].setAttributeNS(XMLNS, "xml:space", "preserve");
@@ -616,7 +641,7 @@ dialog h2{font-size:16px;margin:0 0 8px}
   function facts(d, opts) {
     const body = d.parts["word/document.xml"];
     const paras = el(body, "p");
-    const texts = paras.map(p => clean(ptext(p)));
+    const texts = lineList(paras).map(l => clean(ltext(l.seg)));
     const all = texts.join("\n");
     const f = { year: opts.year || null, date: null, groupName: opts.groupName || "", positions: [], team: [], declarations: [], kinds: new Set() };
     const ym = all.match(/\b(20\d\d) year[ -]end\b/i) || all.match(/\b(20\d\d) (?:Amended )?Income Tax Returns?\b/); if (ym && !f.year) f.year = +ym[1];
@@ -679,8 +704,8 @@ dialog h2{font-size:16px;margin:0 0 8px}
     const kinds = f.kinds.size ? f.kinds : new Set(["payable"]);
 
     // ---- text fixes, one change per paragraph ----
-    const yearsInLetter = (() => { const all = el(body, "p").map(p => clean(ptext(p))); const h = all.find(t => /^\d{4}(\s*(,|&)\s*\d{4})*\s+(Amended\s+)?Income Tax Returns?$/i.test(t)); if (!h) return [Y]; return (h.match(/\d{4}/g) || [Y]).map(Number); })();
-    const amended = el(body, "p").some(p => /^\d{4}.*Amended Income Tax Return/i.test(clean(ptext(p))));
+    const yearsInLetter = (() => { const all = lineList(el(body, "p")).map(l => clean(ltext(l.seg))); const h = all.find(t => /^\d{4}(\s*(,|&)\s*\d{4})*\s+(Amended\s+)?Income Tax Returns?$/i.test(t)); if (!h) return [Y]; return (h.match(/\d{4}/g) || [Y]).map(Number); })();
+    const amended = lineList(el(body, "p")).some(l => /^\d{4}.*Amended Income Tax Return/i.test(clean(ltext(l.seg))));
     const L = letter({ voice, returns: Math.max(1, +opts.returns || entities.length || 1), years: yearsInLetter, kinds, amended, onlyType: entities.length === 1 ? entities[0].type : (f.positions.length === 1 ? typeOf(f.positions[0].name) : "") });
     const textRules = [
       { why: "Removed a stray space in an amount", where: "all", fn: t => t.replace(/(\$[\d,]+)\s+(\.\d{2})\b/g, "$1$2") },
@@ -706,8 +731,8 @@ dialog h2{font-size:16px;margin:0 0 8px}
     ];
     const allParas = [];
     for (const n in d.parts) el(d.parts[n], "p").forEach(p => allParas.push({ p, part: n }));
-    allParas.forEach(({ p, part }) => {
-      const before = ptext(p); if (!before.trim()) return;
+    allParas.forEach(({ p, part }) => lines(p).forEach(seg => {
+      const before = ltext(seg); if (!before.trim()) return;
       const inTable = !!ancestor(p, "tbl");
       let t = before; const why = [];
       textRules.forEach(r => {
@@ -716,33 +741,35 @@ dialog h2{font-size:16px;margin:0 0 8px}
         if (r.where === "text" && inTable) return;
         const nt = r.fn(t); if (nt !== t) { why.push(r.why); t = nt; }
       });
-      if (t !== before) add({ kind: "text", part, label: [...new Set(why)].join("; "), before: clean(before), after: clean(t), apply: () => setText(p, t) });
-    });
+      if (t !== before) add({ kind: "text", part, label: [...new Set(why)].join("; "), before: clean(before), after: clean(t), apply: () => setLine(seg, t) });
+    }));
 
     // ---- the electronic signing line ----
     const bodyParas = el(body, "p");
-    bodyParas.forEach((p, i) => {
-      if (!/ELECTRONIC\s*SIGNING/i.test(ptext(p))) return;
-      for (let j = i + 1; j < Math.min(bodyParas.length, i + 4); j++) {
-        const t = clean(ptext(bodyParas[j])); if (!t) continue;
-        if (/sign/i.test(t) && t !== SIGNING) add({ kind: "text", label: "Approved electronic signing wording", before: t, after: SIGNING, apply: () => setText(bodyParas[j], SIGNING) });
+    const BL = lineList(bodyParas.filter(p => !ancestor(p, "tbl")));
+    BL.forEach((l, i) => {
+      if (!/ELECTRONIC\s*SIGNING/i.test(ltext(l.seg))) return;
+      for (let j = i + 1; j < Math.min(BL.length, i + 4); j++) {
+        const t = clean(ltext(BL[j].seg)); if (!t) continue;
+        if (/sign/i.test(t) && t !== SIGNING) add({ kind: "text", label: "Approved electronic signing wording", before: t, after: SIGNING, apply: () => setLine(BL[j].seg, SIGNING) });
         break;
       }
     });
 
     // ---- lines to remove ----
-    const remove = (p, label) => add({ kind: "remove", label, before: clean(ptext(p)), after: "", apply: () => { const tc = ancestor(p, "tc"); if (tc && cellParas(tc).length <= 1) setText(p, ""); else if (p.parentNode) p.parentNode.removeChild(p); } });
-    bodyParas.forEach((p, i) => {
-      const t = clean(ptext(p)); if (!t) return;
-      if (voice === "single" && (/^Please carefully read each section and highlight/i.test(t) || /^We look forward to continuing to help you/i.test(t))) remove(p, "One entity, so this introduction line comes out");
+    // a line that is a paragraph of its own is removed; a line inside a longer paragraph is emptied
+    const remove = (l, label) => add({ kind: "remove", label, before: clean(ltext(l.seg)), after: "", apply: () => { const p = l.p; if (!l.single) { setLine(l.seg, ""); return; } const tc = ancestor(p, "tc"); if (tc && cellParas(tc).length <= 1) setText(p, ""); else if (p.parentNode) p.parentNode.removeChild(p); } });
+    BL.forEach((l, i) => {
+      const p = l.p; const t = clean(ltext(l.seg)); if (!t) return;
+      if (voice === "single" && (/^Please carefully read each section and highlight/i.test(t) || /^We look forward to continuing to help you/i.test(t))) remove(l, "One entity, so this introduction line comes out");
       const ar = /\s*We will discuss (these|this) with you (at|on|in|during) (our|your|the) Annual Review Meeting\.?/i;
-      if (ar.test(t)) { const rest = clean(t.replace(ar, "")); if (!rest) remove(p, "The Annual Review Meeting line isn’t needed"); else add({ kind: "text", label: "The Annual Review Meeting line isn’t needed", before: t, after: rest, apply: () => setText(p, rest) }); }
+      if (ar.test(t)) { const rest = clean(t.replace(ar, "")); if (!rest) remove(l, "The Annual Review Meeting line isn’t needed"); else add({ kind: "text", label: "The Annual Review Meeting line isn’t needed", before: t, after: rest, apply: () => setLine(l.seg, clean(ltext(l.seg).replace(ar, ""))) }); }
       if (/^Would you like to discuss your results\??$/i.test(t)) {
-        remove(p, "The “discuss your results” block isn’t needed");
+        remove(l, "The “discuss your results” block isn’t needed");
         let n = 0;
-        for (let j = i + 1; j < bodyParas.length && n < 4; j++) {
-          const q = bodyParas[j], qt = clean(ptext(q));
-          if (hasPageBreak(q) || (qt && isHeadingText(qt)) || ancestor(q, "tbl")) break;
+        for (let j = i + 1; j < BL.length && n < 4; j++) {
+          const q = BL[j], qt = clean(ltext(q.seg));
+          if ((q.p !== p && hasPageBreak(q.p)) || (qt && isHeadingText(qt))) break;
           if (!qt) continue; remove(q, "The “discuss your results” block isn’t needed"); n++;
         }
       }
@@ -810,7 +837,7 @@ dialog h2{font-size:16px;margin:0 0 8px}
     });
 
     // ---- things a person needs to look at ----
-    bodyParas.forEach(p => { const t = clean(ptext(p)); if (/\bto\s*-\s*\$[\d,]+/.test(t)) flags.push(`“${t.slice(0, 110)}${t.length > 110 ? "…" : ""}” shows a negative profit. Check whether it should say it’s a loss.`); });
+    BL.forEach(l => { const t = clean(ltext(l.seg)); if (/\bto\s*-\s*\$[\d,]+/.test(t)) flags.push(`“${t.slice(0, 110)}${t.length > 110 ? "…" : ""}” shows a negative profit. Check whether it should say it’s a loss.`); });
     f.positions.filter(x => /payable/.test(x.kind) && typeOf(x.name) === "company").forEach(x => flags.push(`${x.name} has ${x.amount} payable. The ATO payment slip needs to be in its documents in the collation.`));
     if (f.positions.length) flags.push("Check the due dates in the final tax positions table against the ATO portal.");
     if (f.team.length) flags.push(`The introduction lists ${f.team.join(" and ")} as the team. Check these are the right people.`);
